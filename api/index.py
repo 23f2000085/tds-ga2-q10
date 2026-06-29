@@ -1,6 +1,6 @@
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 import uuid
 import time
 
@@ -8,49 +8,67 @@ EMAIL = "23f2000085@ds.study.iitm.ac.in"
 
 app = FastAPI()
 
+# ONLY these two origins are allowed
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://app-ziiy19.example.com",
+        "https://exam.sanand.workers.dev",
+    ],
     allow_credentials=False,
-    allow_methods=["*"],
+    allow_methods=["GET", "OPTIONS"],
     allow_headers=["*"],
-    expose_headers=["*"],
+    expose_headers=["X-Request-ID"],
 )
 
+# Handle browser preflight
+@app.options("/ping")
+async def options_ping():
+    return Response(status_code=200)
+
+# Rate limit configuration
 WINDOW = 10
 LIMIT = 11
 clients = {}
 
 @app.middleware("http")
-async def middleware(request: Request, call_next):
+async def request_context_and_rate_limit(request: Request, call_next):
 
-    req_id = request.headers.get("X-Request-ID")
+    # Request ID
+    request_id = request.headers.get("X-Request-ID")
+    if not request_id:
+        request_id = str(uuid.uuid4())
 
-    if not req_id:
-        req_id = str(uuid.uuid4())
+    request.state.request_id = request_id
 
-    # IMPORTANT: set BEFORE call_next()
-    request.state.request_id = req_id
+    # Rate limiting
+    client_id = request.headers.get("X-Client-Id", "anonymous")
 
-    client = request.headers.get("X-Client-Id", "anonymous")
     now = time.time()
 
-    if client not in clients:
-        clients[client] = []
+    if client_id not in clients:
+        clients[client_id] = []
 
-    clients[client] = [t for t in clients[client] if now - t < WINDOW]
+    # Remove expired timestamps
+    clients[client_id] = [
+        t for t in clients[client_id]
+        if now - t < WINDOW
+    ]
 
-    if len(clients[client]) >= LIMIT:
-        return JSONResponse(
+    if len(clients[client_id]) >= LIMIT:
+        response = JSONResponse(
             status_code=429,
             content={"detail": "Rate limit exceeded"}
         )
+        response.headers["X-Request-ID"] = request_id
+        return response
 
-    clients[client].append(now)
+    clients[client_id].append(now)
 
     response = await call_next(request)
 
-    response.headers["X-Request-ID"] = req_id
+    # Always return request id header
+    response.headers["X-Request-ID"] = request_id
 
     return response
 
